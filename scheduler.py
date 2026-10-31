@@ -1,0 +1,207 @@
+"""The "tick": called every few minutes by an external cron service.
+
+Each tick is idempotent and cheap:
+  1. make sure today's quiz times exist (random, inside the evening window)
+  2. post every quiz whose time has come
+  3. warn admins about empty / low queues and anything that went wrong
+It keeps no state in memory, so it works even if the host sleeps between pings.
+"""
+import logging
+import random
+from datetime import datetime, timedelta, timezone
+
+import config
+import db
+from telegram_api import TelegramClient, TelegramError
+
+log = logging.getLogger(__name__)
+UTC = timezone.utc
+
+
+def subject_for(day):
+    return config.SUBJECT_BY_WEEKDAY[day.weekday()]
+
+
+def plan_slots(day, now, rng):
+    """Random post times for `day`: inside the window, at least MIN_GAP apart.
+
+    If the schedule is created late (service was down), the window starts at
+    `now` instead and may stretch slightly past WINDOW_END.
+    """
+    start = datetime.combine(day, config.WINDOW_START, tzinfo=config.ADDIS_TZ)
+    end = datetime.combine(day, config.WINDOW_END, tzinfo=config.ADDIS_TZ)
+    start = max(start, now + timedelta(minutes=1))
+    n = config.QUESTIONS_PER_DAY
+    gap = config.MIN_GAP
+    free = (end - start) - gap * (n - 1)
+    if free <= timedelta(0):
+        return [start + gap * i for i in range(n)]
+    # n random points in the free span, then spread by i*gap -> gaps >= MIN_GAP.
+    offsets = sorted(rng.uniform(0, free.total_seconds()) for _ in range(n))
+    return [start + timedelta(seconds=o) + gap * i for i, o in enumerate(offsets)]
+
+
+def ensure_schedule(now, rng):
+    """Create today's slots once. Returns 'planned', 'late' or None (already existed)."""
+    day = now.astimezone(config.ADDIS_TZ).date()
+    end = datetime.combine(day, config.WINDOW_END, tzinfo=config.ADDIS_TZ)
+    late = now >= end
+    with db.tx() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(724001)")  # one planner at a time
+        cur.execute("SELECT count(*) AS n FROM schedule WHERE day = %s", (day,))
+        if cur.fetchone()["n"]:
+            return None
+        subject = subject_for(day)
+        for i, t in enumerate(plan_slots(day, now, rng), start=1):
+            cur.execute(
+                """INSERT INTO schedule (day, slot, subject, planned_at, status)
+                   VALUES (%s, %s, %s, %s, %s) ON CONFLICT (day, slot) DO NOTHING""",
+                (day, i, subject, t, "missed" if late else "planned"),
+            )
+    return "late" if late else "planned"
+
+
+def _is_config_error(e):
+    """Errors that say 'the bot/group is set up wrong', not 'this question is bad'."""
+    desc = str(e).lower()
+    return (
+        e.code in (401, 403, 404, 429)
+        or (e.code or 0) >= 500
+        or any(k in desc for k in (
+            "chat not found", "thread not found", "not enough rights", "kicked",
+            "forbidden", "not a member", "have no rights", "topic",
+        ))
+    )
+
+
+class Alerts:
+    """Sends admin notifications; each (day, subject, kind) is sent at most once."""
+
+    def __init__(self, tg):
+        self.tg = tg
+
+    def notify_admins(self, text):
+        for admin_id in config.ADMIN_IDS:
+            try:
+                self.tg.send_message(admin_id, text)
+            except TelegramError as e:
+                # Usually: the admin never pressed Start in a chat with the bot.
+                log.warning("could not notify admin %s: %s", admin_id, e)
+
+    def once(self, day, subject, kind, text):
+        if db.alert_once(day, subject, kind):
+            self.notify_admins(text)
+            return True
+        return False
+
+
+def _name(subject):
+    return subject.capitalize()
+
+
+def _recover_stale(now, alerts):
+    for s in db.stale_sending(now):
+        db.resolve_stale(s["id"], s["question_id"])
+        preview = (s["question"] or "")[:60]
+        alerts.once(
+            s["day"], s["subject"], "unconfirmed",
+            f"❓ {_name(s['subject'])}: a quiz was sent to Telegram but I never got confirmation "
+            f"(network problem?). Please check the group topic. I treated it as posted, "
+            f"so it will not be sent again.\nQuestion: {preview}",
+        )
+
+
+def _process_slot(slot, now, tg, alerts, summary):
+    subject, day = slot["subject"], slot["day"]
+    topic = db.get_topic(subject)
+    if topic is None:
+        alerts.once(
+            day, subject, "no_topic",
+            f"⚙️ No group topic is set for {_name(subject)}. Open that topic in the group and "
+            f"send: /settopic {subject}\nThe quiz will go out automatically once it is set.",
+        )
+        summary["blocked"] += 1
+        return
+
+    state, q = db.claim_next_question(slot["id"], subject, now)
+    if state == "taken":
+        return
+    if state == "empty":
+        alerts.once(
+            day, subject, "empty",
+            f"📭 The {_name(subject)} queue is empty, so today's {_name(subject)} quiz was not "
+            f"posted. Send me an Excel file with more {_name(subject)} questions — if you do it "
+            f"within the next couple of hours it will still go out today.",
+        )
+        summary["blocked"] += 1
+        return
+
+    try:
+        tg.send_quiz(topic["chat_id"], topic["thread_id"], q)
+    except TelegramError as e:
+        if not e.definitive:
+            log.error("send outcome unknown for slot %s: %s", slot["id"], e)
+            summary["unconfirmed"] += 1
+            return  # stays 'sending'; _recover_stale reports it after STALE_AFTER
+        status = db.release_claim(slot["id"], q["id"], str(e), burn_question=not _is_config_error(e))
+        if status == "failed":
+            summary["failed"] += 1
+            alerts.once(
+                day, subject, "failed",
+                f"🚫 I couldn't post the {_name(subject)} quiz after {config.MAX_ATTEMPTS} "
+                f"attempts.\nTelegram said: {e}\n"
+                f"Check that the bot is an admin of the group and the topic still exists.",
+            )
+        return
+
+    db.mark_sent(slot["id"], q["id"], now)
+    summary["sent"] += 1
+
+    remaining = db.pending_count(subject)
+    if remaining < config.QUESTIONS_PER_DAY:
+        weekday = day.strftime("%A")
+        if remaining == 0:
+            text = (f"📭 The {_name(subject)} queue is now empty. Next {weekday}'s quiz needs "
+                    f"{config.QUESTIONS_PER_DAY} new questions — please upload more.")
+        else:
+            text = (f"⚠️ Only {remaining} {_name(subject)} question left. Next {weekday} needs "
+                    f"{config.QUESTIONS_PER_DAY} — please upload more.")
+        alerts.once(day, subject, f"low{remaining}", text)
+
+
+def run_tick(now=None, tg=None, rng=None):
+    now = now or datetime.now(UTC)
+    tg = tg or TelegramClient()
+    rng = rng or random.Random()
+    alerts = Alerts(tg)
+    summary = {
+        "time": now.astimezone(config.ADDIS_TZ).isoformat(timespec="minutes"),
+        "sent": 0, "blocked": 0, "failed": 0, "unconfirmed": 0,
+    }
+
+    db.ensure_schema()
+    _recover_stale(now, alerts)
+
+    day = now.astimezone(config.ADDIS_TZ).date()
+    if ensure_schedule(now, rng) == "late":
+        subject = subject_for(day)
+        alerts.once(
+            day, subject, "missed",
+            f"⏰ The service only woke up after the quiz window, so today's {_name(subject)} "
+            f"quizzes were skipped. (Is the cron ping running every 5 minutes?)",
+        )
+
+    for m in db.expire_old_slots(now):
+        # Skip the "missed" notice if an earlier alert already explains it.
+        if not db.has_alert(m["day"], m["subject"], ("empty", "no_topic", "failed", "missed")):
+            alerts.once(
+                m["day"], m["subject"], "missed",
+                f"⏰ A {_name(m['subject'])} quiz was not posted in time and was skipped. "
+                f"(Is the cron ping running every 5 minutes?)",
+            )
+
+    for slot in db.due_slots(now):
+        _process_slot(slot, now, tg, alerts, summary)
+
+    log.info("tick %s", summary)
+    return summary
