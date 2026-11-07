@@ -25,24 +25,23 @@ ADMIN_IDS = _int_set(os.environ.get("ADMIN_IDS", "5839558908"))
 # ---- schedule ---------------------------------------------------------------
 # Ethiopia has no daylight saving time, so a fixed UTC+3 offset is exact.
 ADDIS_TZ = timezone(timedelta(hours=3))
-WINDOW_START = time(18, 30)       # quizzes are posted at random times
-WINDOW_END = time(21, 0)          # between these two (Addis Ababa time)
-QUESTIONS_PER_DAY = 2             # per subject day  ->  14 per week
-MIN_GAP = timedelta(minutes=30)   # minimum gap between the day's quizzes
+WINDOW_START = time(7, 0)         # quizzes are posted at random times
+WINDOW_END = time(22, 0)          # between these two (Addis Ababa time)
+QUESTIONS_PER_SUBJECT = 1         # questions per subject on each day it is scheduled
+MIN_GAP = timedelta(minutes=5)    # minimum gap between two quizzes (they go to different topics)
 GRACE = timedelta(hours=2)        # a quiz that is this late is skipped, not posted
 STALE_AFTER = timedelta(minutes=10)
 MAX_ATTEMPTS = 3                  # Telegram send attempts per quiz slot
+LOW_QUEUE_DAYS = 3                # warn the admin when a subject has fewer questions than this
 
-SUBJECT_BY_WEEKDAY = {            # Monday = 0
-    0: "logic",
-    1: "english",
-    2: "physics",
-    3: "geography",
-    4: "math",
-    5: "psychology",
-    6: "history",
-}
-SUBJECTS = list(SUBJECT_BY_WEEKDAY.values())
+SUBJECTS = ["logic", "english", "physics", "geography", "math", "psychology", "history"]
+
+# Which subjects are posted on which weekday (Monday = 0).
+# Now: every subject, every day = 7 quizzes a day (49 a week), one per subject topic.
+# To go back to one subject per day, replace this with e.g.
+#   {0: ["logic"], 1: ["english"], 2: ["physics"], 3: ["geography"],
+#    4: ["math"], 5: ["psychology"], 6: ["history"]}
+SCHEDULE_BY_WEEKDAY = {d: list(SUBJECTS) for d in range(7)}
 SUBJECT_ALIASES = {
     "maths": "math", "mathematics": "math",
     "eng": "english",
