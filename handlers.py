@@ -18,9 +18,9 @@ HELP = (
     "• /template — Excel template\n\n"
     "In the group, inside each subject's topic, send: /settopic <subject>\n"
     "Subjects: " + ", ".join(config.SUBJECTS) + "\n\n"
-    "Schedule: " + ", ".join(
-        f"{config.DAY_ABBR[d]}={s}" for d, s in config.SUBJECT_BY_WEEKDAY.items()
-    ) + f"; {config.QUESTIONS_PER_DAY} quizzes per day in the evening."
+    f"Schedule: every day, {config.QUESTIONS_PER_SUBJECT} question per subject "
+    f"({len(config.SUBJECTS)} quizzes a day), at random times between "
+    f"{config.WINDOW_START:%H:%M} and {config.WINDOW_END:%H:%M}."
 )
 
 
@@ -116,11 +116,11 @@ def _topics_text():
 def _queue_text():
     counts = db.queue_counts()
     lines = ["📚 Questions left per subject"]
-    for wd, subject in config.SUBJECT_BY_WEEKDAY.items():
+    for subject in config.SUBJECTS:
         left = counts.get(subject, {}).get("pending", 0)
-        weeks = left // config.QUESTIONS_PER_DAY
-        flag = "⚠️ " if left < config.QUESTIONS_PER_DAY else ""
-        lines.append(f"{flag}{subject.capitalize()} ({config.DAY_ABBR[wd]}): {left} left ≈ {weeks} wk")
+        days = left // config.QUESTIONS_PER_SUBJECT
+        flag = "⚠️ " if left < config.LOW_QUEUE_DAYS * config.QUESTIONS_PER_SUBJECT else ""
+        lines.append(f"{flag}{subject.capitalize()}: {left} left ≈ {days} day{'s' if days != 1 else ''}")
     return "\n".join(lines)
 
 
@@ -130,10 +130,10 @@ def _today_text():
     if not slots:
         return ("Nothing planned yet for today. Times are chosen at the first check of the day "
                 "(the cron ping).")
-    lines = [f"🗓 {day.strftime('%A')} — {slots[0]['subject'].capitalize()}"]
-    for s in slots:
+    lines = [f"🗓 {day.strftime('%A')} — {len(slots)} quizzes"]
+    for s in sorted(slots, key=lambda s: s["planned_at"]):
         t = s["planned_at"].astimezone(config.ADDIS_TZ).strftime("%H:%M")
-        lines.append(f"Quiz {s['slot']}: {t} — {s['status']}")
+        lines.append(f"{t} — {s['subject'].capitalize()} — {s['status']}")
     return "\n".join(lines)
 
 
