@@ -1,102 +1,70 @@
-# Telegram Quiz Bot
+# Telegram Academic Quiz Bot
 
-Posts anonymous **quiz-mode polls** (one correct answer + short explanation) to a Telegram
-group, one subject per weekday, 2 quizzes per day at random evening times
-(18:30–21:00 Addis Ababa). Admins add questions by sending an **Excel file** to the bot.
+Posts anonymous quiz-mode polls (one correct answer + short explanation) to a Telegram group using **Telegram Topics**. It sends **2 quizzes per day** at random evening times (18:30–21:00 Addis Ababa). Admins add questions seamlessly by uploading an Excel file directly to the bot.
 
-| Day | Subject | Day | Subject |
-|-----|---------|-----|---------|
-| Mon | Logic | Fri | Math |
-| Tue | English | Sat | Psychology |
-| Wed | Physics | Sun | History |
-| Thu | Geography | | |
+---
 
-2 quizzes × 7 days = **14 questions/week**. Each subject posts into its own topic of the same group.
+## How It Works
 
-## How it works
+* **Stateless App Architecture:** No background scheduler runs inside the app process. Instead, an external ping service hits `/tick` every 5 minutes. The app plans the day's random times on the fly and posts whatever is due.
+* **Webhook Handling:** Telegram updates (Excel uploads, admin configurations like `/settopic`) hit `/webhook`.
+* **Database Backend:** All questions, active topics, and queue states live strictly in **PostgreSQL**, meaning redeploys will never wipe your queue.
 
-```
-cron-job.org ──every 5 min──► /tick   (plans today's random times, posts what is due)
-Telegram ────admin messages──► /webhook (Excel uploads, /settopic, /queue ...)
-                     both read/write ──► Postgres (questions, topics, schedule)
-```
-No scheduler runs inside the app, so it still works if the host sleeps between pings.
-Questions live in Postgres, not on the server disk, so redeploys can't wipe your queue.
-Posts can be up to ~5 minutes later than the planned time (the ping interval).
+---
 
-## Setup (about 20 minutes)
+## Setup Guide
 
-### 1. Create the bot
-In Telegram, talk to **@BotFather** → `/newbot` → copy the token.
-Then open your bot and press **Start** (otherwise it can't send you alerts).
+### 1. Create the Bot
+1. Message **@BotFather** on Telegram to create your bot and copy your `BOT_TOKEN`.
+2. Open a direct chat with your new bot and press **Start** so it has permission to message you.
 
-### 2. Create a free Postgres database
-Any hosted Postgres works (e.g. Neon or Supabase — check their current free-tier terms).
-Copy the connection string (`postgresql://...`). The bot creates its tables automatically.
+### 2. Set Up the Database
+1. Create a hosted PostgreSQL database (e.g., via Neon, Supabase, or Render).
+2. Copy your connection string (`postgresql://...`). The app initializes its required tables automatically on startup.
 
-### 3. Push this folder to GitHub
-Never commit real secrets (`.env` is git-ignored).
+### 3. Deploy
+Deploy the repository to your host of choice (such as Ethiodeploy or Render) and set the following environment variables:
 
-### 4. Deploy on Ethiodeploy
-Create a project from the GitHub repo. Set these **environment variables**:
+| Variable | Description |
+| :--- | :--- |
+| `BOT_TOKEN` | Provided by BotFather |
+| `DATABASE_URL` | Your Postgres connection string |
+| `CRON_SECRET` | A secure random string for protecting the tick endpoint |
+| `WEBHOOK_SECRET` | A secure random string for protecting webhooks |
+| `PUBLIC_URL` | Your deployed application's HTTPS URL (no trailing slash) |
+| `ADMIN_IDS` | Comma-separated list of authorized Telegram user IDs |
 
-| Variable | Value |
-|----------|-------|
-| `BOT_TOKEN` | from BotFather |
-| `DATABASE_URL` | Postgres connection string |
-| `CRON_SECRET` | a long random string |
-| `WEBHOOK_SECRET` | another long random string (letters, digits, `_`, `-`) |
-| `PUBLIC_URL` | your deployed https URL, no trailing slash |
+### 4. Register the Webhook
+Open `https://YOUR-PUBLIC-URL/setup?key=CRON_SECRET` once in your browser. You should receive a response confirming `{"ok": true}`.
 
-Start command (if it asks): `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`
-(a `Procfile` and a `Dockerfile` are included — use whichever the platform expects).
-Generate secrets with: `python -c "import secrets; print(secrets.token_urlsafe(24))"`
+### 5. Configure the Cron Pinger
+Set up an external cron monitor (such as cron-job.org) to send a GET request every **5 minutes** to:
+`https://YOUR-PUBLIC-URL/tick?key=CRON_SECRET`
 
-### 5. Register the webhook (once)
-Open `https://YOUR-URL/setup?key=CRON_SECRET` in a browser. You should see `"ok": true`.
+### 6. Configure Telegram Topics
+1. Enable **Topics** in your Telegram group settings and create one topic for each subject.
+2. Add your bot to the group as an **Administrator** with permission to send messages.
+3. Inside *each* specific topic, send `/settopic <subject>` (e.g., `/settopic physics`) **as yourself** (not as an anonymous admin). The bot will reply inside that topic to confirm the binding.
 
-### 6. Start the schedule pings
-At **cron-job.org** (free) create a job: URL `https://YOUR-URL/tick?key=CRON_SECRET`,
-every **5 minutes**. This is what posts the quizzes — if it stops, nothing is posted
-(you'll get an alert the next time it runs).
+---
 
-### 7. Set up the group
-1. Group settings → turn on **Topics**; create one topic per subject.
-2. Add the bot as **admin** (it needs permission to post).
-3. Inside **each** topic, send `/settopic <subject>` (e.g. `/settopic physics`) **as yourself,
-   not as anonymous admin**. The bot confirms in that topic.
-4. Check with `/topics` in a private chat with the bot.
+## Adding Questions
 
-### 8. Add questions
-Private chat with the bot → `/template` → fill it in → send the `.xlsx` back.
-The bot replies with how many were added and which rows were rejected and why.
+1. Open a private chat with the bot and send `/template` to download the standard Excel template.
+2. Fill out your questions following this format:
 
 | subject | question | A | B | C | D | correct | explanation |
-|---------|----------|---|---|---|---|---------|-------------|
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | math | What is 12 × 12? | 124 | 134 | 144 | 154 | C | 12 × 12 = 144 |
 
-* Limits (Telegram): question 300 chars, option 100, explanation 200. C and D may be empty.
-* Questions post in upload order (top row first). Re-uploading the same question text is ignored.
-* Delete the `[SAMPLE]` rows from the template (they are skipped anyway).
+3. Send the completed `.xlsx` file back to the bot in your private chat. The bot will parse the file, add valid rows to the queue, and report any rejections.
 
-## Admin commands (private chat with the bot)
-`/queue` questions left per subject · `/today` today's post times · `/topics` topic mapping ·
-`/template` Excel template · `/help`.
-Add more admins with the `ADMIN_IDS` variable (comma-separated Telegram IDs).
+---
 
-## Alerts you will receive
-* Queue empty / fewer than 2 questions left for a subject (once per day per subject)
-* A subject has no topic set · Telegram refused to post · a quiz was skipped (service asleep or cron stopped)
+## Admin Commands (Private Chat)
 
-## Behaviour worth knowing
-* If a post fails because of setup (bot not admin, topic deleted) the question is **kept**; after 3 tries the
-  slot is marked failed and you're alerted. If Telegram rejects the question itself, it's marked rejected and skipped.
-* If a Telegram call times out and it's unclear whether the quiz posted, the bot does **not** retry
-  (to avoid posting twice) — it tells you to check the topic.
-* A quiz more than 2 hours late is skipped instead of posted at night.
-
-## Tests
-```
-pip install -r requirements.txt pytest
-TEST_DATABASE_URL=postgresql://user@localhost/testdb pytest -q   # WIPES that database's tables
-```
+* `/queue` — View remaining questions left per subject.
+* `/today` — Check scheduled post times for today.
+* `/topics` — View current topic-to-subject mappings.
+* `/template` — Download the questions Excel template.
+* `/help` — View available commands.
