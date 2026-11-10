@@ -18,31 +18,18 @@ log = logging.getLogger(__name__)
 UTC = timezone.utc
 
 
-def subject_for(day):
-    return config.SUBJECT_BY_WEEKDAY[day.weekday()]
-
-
-def plan_slots(day, now, rng):
-    """Random post times for `day`: inside the window, at least MIN_GAP apart.
-
-    If the schedule is created late (service was down), the window starts at
-    `now` instead and may stretch slightly past WINDOW_END.
-    """
+def plan_slots(day, now, rng, n):
     start = datetime.combine(day, config.WINDOW_START, tzinfo=config.ADDIS_TZ)
     end = datetime.combine(day, config.WINDOW_END, tzinfo=config.ADDIS_TZ)
     start = max(start, now + timedelta(minutes=1))
-    n = config.QUESTIONS_PER_DAY
     gap = config.MIN_GAP
     free = (end - start) - gap * (n - 1)
     if free <= timedelta(0):
         return [start + gap * i for i in range(n)]
-    # n random points in the free span, then spread by i*gap -> gaps >= MIN_GAP.
     offsets = sorted(rng.uniform(0, free.total_seconds()) for _ in range(n))
     return [start + timedelta(seconds=o) + gap * i for i, o in enumerate(offsets)]
 
-
 def ensure_schedule(now, rng):
-    """Create today's slots once. Returns 'planned', 'late' or None (already existed)."""
     day = now.astimezone(config.ADDIS_TZ).date()
     end = datetime.combine(day, config.WINDOW_END, tzinfo=config.ADDIS_TZ)
     late = now >= end
@@ -51,12 +38,24 @@ def ensure_schedule(now, rng):
         cur.execute("SELECT count(*) AS n FROM schedule WHERE day = %s", (day,))
         if cur.fetchone()["n"]:
             return None
-        subject = subject_for(day)
-        for i, t in enumerate(plan_slots(day, now, rng), start=1):
+        
+        # Base: 1 question for all 7 subjects scheduled for today
+        base_subjects = config.SCHEDULE_BY_WEEKDAY[day.weekday()]
+        subjects = list(base_subjects)
+        
+        # Extra: 4 random questions from those same 7 subjects
+        extra_subjects = rng.sample(base_subjects, 4)
+        subjects.extend(extra_subjects)
+        
+        # Plan times for all 11 questions
+        times = plan_slots(day, now, rng, len(subjects))
+        
+        for slot_idx, subject in enumerate(subjects, start=1):
+            t = times[slot_idx - 1]
             cur.execute(
                 """INSERT INTO schedule (day, slot, subject, planned_at, status)
                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (day, slot) DO NOTHING""",
-                (day, i, subject, t, "missed" if late else "planned"),
+                (day, slot_idx, subject, t, "missed" if late else "planned"),
             )
     return "late" if late else "planned"
 
@@ -184,11 +183,9 @@ def run_tick(now=None, tg=None, rng=None):
 
     day = now.astimezone(config.ADDIS_TZ).date()
     if ensure_schedule(now, rng) == "late":
-        subject = subject_for(day)
         alerts.once(
-            day, subject, "missed",
-            f"⏰ The service only woke up after the quiz window, so today's {_name(subject)} "
-            f"quizzes were skipped. (Is the cron ping running every 5 minutes?)",
+            day, "System", "missed",
+            "⏰ The service woke up late, so today's 11 quizzes were skipped."
         )
 
     for m in db.expire_old_slots(now):
