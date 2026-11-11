@@ -91,17 +91,16 @@ def ensure_schema(force=False):
 def set_topic(subject, chat_id, thread_id):
     with tx() as cur:
         cur.execute(
-            """INSERT INTO topics (subject, chat_id, thread_id) VALUES (%s, %s, %s)
-               ON CONFLICT (subject) DO UPDATE
-               SET chat_id = EXCLUDED.chat_id, thread_id = EXCLUDED.thread_id""",
+            """INSERT INTO topics (subject, chat_id, thread_id)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (subject, chat_id) DO UPDATE SET thread_id = EXCLUDED.thread_id""",
             (subject, chat_id, thread_id),
         )
 
-
-def get_topic(subject):
+def get_topics(subject):
     with tx() as cur:
         cur.execute("SELECT chat_id, thread_id FROM topics WHERE subject = %s", (subject,))
-        return cur.fetchone()
+        return cur.fetchall()
 
 
 def all_topics():
