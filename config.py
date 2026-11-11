@@ -8,7 +8,7 @@ from datetime import time, timedelta, timezone
 
 
 def _int_set(value):
-    return {int(x) for x in value.replace(" ", "").split(",") if x}
+    return {int(x) for x in value.replace(" ", "").split(",") if x}
 
 
 # ---- secrets / deployment (environment variables) --------------------------
@@ -20,7 +20,7 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")  # e.g. https://my-bo
 
 # Telegram user IDs allowed to upload questions and use admin commands.
 # Default is your ID; add more with ADMIN_IDS="5839558908,123456789".
-ADMIN_IDS = _int_set(os.environ.get("ADMIN_IDS", "5839558908"))
+ADMIN_IDS = _int_set(os.environ.get("ADMIN_IDS", ""))
 
 # ---- schedule ---------------------------------------------------------------
 # Ethiopia has no daylight saving time, so a fixed UTC+3 offset is exact.
