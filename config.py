@@ -29,6 +29,7 @@ WINDOW_START = time(7, 0)     # quizzes are posted at random times
 WINDOW_END = time(22, 0)      # between these two (Addis Ababa time)
 
 QUESTIONS_PER_DAY = 1         # questions per subject on each day it is scheduled
+QUESTIONS_PER_SUBJECT = 1     # Added to fix handlers.py crash
 MIN_GAP = timedelta(minutes=5) # minimum gap between two quizzes (they go to different topics)
 GRACE = timedelta(hours=3)    # a quiz that is this late is skipped, not posted
 
