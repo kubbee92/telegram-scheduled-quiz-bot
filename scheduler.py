@@ -112,8 +112,9 @@ def _recover_stale(now, alerts):
 
 def _process_slot(slot, now, tg, alerts, summary):
     subject, day = slot["subject"], slot["day"]
-    topic = db.get_topic(subject)
-    if topic is None:
+    topics = db.get_topics(subject)
+    
+    if not topics:
         alerts.once(
             day, subject, "no_topic",
             f"⚙️ No group topic is set for {_name(subject)}. Open that topic in the group and "
@@ -135,20 +136,34 @@ def _process_slot(slot, now, tg, alerts, summary):
         summary["blocked"] += 1
         return
 
-    try:
-        tg.send_quiz(topic["chat_id"], topic["thread_id"], q)
-    except TelegramError as e:
-        if not e.definitive:
-            log.error("send outcome unknown for slot %s: %s", slot["id"], e)
+    success_count = 0
+    last_error = None
+    unconfirmed = False
+    
+    # Loop through all registered groups and send the quiz to each
+    for topic in topics:
+        try:
+            tg.send_quiz(topic["chat_id"], topic["thread_id"], q)
+            success_count += 1
+        except TelegramError as e:
+            last_error = e
+            if not e.definitive:
+                unconfirmed = True
+                log.error("send outcome unknown for slot %s: %s", slot["id"], e)
+
+    # If it failed to send to ALL groups
+    if success_count == 0:
+        if unconfirmed:
             summary["unconfirmed"] += 1
             return  # stays 'sending'; _recover_stale reports it after STALE_AFTER
-        status = db.release_claim(slot["id"], q["id"], str(e), burn_question=not _is_config_error(e))
+            
+        status = db.release_claim(slot["id"], q["id"], str(last_error), burn_question=not _is_config_error(last_error))
         if status == "failed":
             summary["failed"] += 1
             alerts.once(
                 day, subject, "failed",
                 f"🚫 I couldn't post the {_name(subject)} quiz after {config.MAX_ATTEMPTS} "
-                f"attempts.\nTelegram said: {e}\n"
+                f"attempts.\nTelegram said: {last_error}\n"
                 f"Check that the bot is an admin of the group and the topic still exists.",
             )
         return
@@ -163,9 +178,9 @@ def _process_slot(slot, now, tg, alerts, summary):
             text = (f"📭 The {_name(subject)} queue is now empty. Next {weekday}'s quiz needs "
                     f"{config.QUESTIONS_PER_DAY} new questions — please upload more.")
         else:
-            text = (f"⚠️ Only {remaining} {_name(subject)} question left. Next {weekday} needs "
-                    f"{config.QUESTIONS_PER_DAY} — please upload more.")
-        alerts.once(day, subject, f"low{remaining}", text)
+            text = (f"⚠️ The {_name(subject)} queue is running low ({remaining} left). Next {weekday}'s "
+                    f"quiz needs {config.QUESTIONS_PER_DAY} questions.")
+        alerts.once(day, subject, "low_queue", text)
 
 
 def run_tick(now=None, tg=None, rng=None):
