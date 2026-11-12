@@ -39,15 +39,11 @@ def ensure_schedule(now, rng):
         if cur.fetchone()["n"]:
             return None
         
-        # Base: 1 question for all 7 subjects scheduled for today
+        # Plan 1 question for all subjects scheduled for today
         base_subjects = config.SCHEDULE_BY_WEEKDAY[day.weekday()]
         subjects = list(base_subjects)
         
-        # Extra: 4 random questions from those same 7 subjects
-        extra_subjects = rng.sample(base_subjects, 4)
-        subjects.extend(extra_subjects)
-        
-        # Plan times for all 11 questions
+        # Plan times for all scheduled questions
         times = plan_slots(day, now, rng, len(subjects))
         
         for slot_idx, subject in enumerate(subjects, start=1):
@@ -200,7 +196,7 @@ def run_tick(now=None, tg=None, rng=None):
     if ensure_schedule(now, rng) == "late":
         alerts.once(
             day, "System", "missed",
-            "⏰ The service woke up late, so today's 11 quizzes were skipped."
+            "⏰ The service woke up late, so today's scheduled quizzes were skipped."
         )
 
     for m in db.expire_old_slots(now):
